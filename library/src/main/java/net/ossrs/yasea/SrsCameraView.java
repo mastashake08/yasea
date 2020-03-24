@@ -1,5 +1,6 @@
 package net.ossrs.yasea;
 
+import android.app.Activity;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.graphics.ImageFormat;
@@ -9,6 +10,7 @@ import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
 import android.util.AttributeSet;
+import android.view.Surface;
 
 import com.seu.magicfilter.base.gpuimage.GPUImageFilter;
 import com.seu.magicfilter.utils.MagicFilterFactory;
@@ -54,6 +56,7 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
     private final Object writeLock = new Object();
     private ConcurrentLinkedQueue<IntBuffer> mGLIntBufferCache = new ConcurrentLinkedQueue<>();
     private PreviewCallback mPrevCb;
+    private CameraCallbacksHandler cameraCallbacksHandler = new CameraCallbacksHandler();
 
     public SrsCameraView(Context context) {
         this(context, null);
@@ -101,6 +104,7 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
         mSurfaceWidth = width;
         mSurfaceHeight = height;
         magicFilter.onDisplaySizeChanged(width, height);
+        magicFilter.onInputSizeChanged(mPreviewWidth, mPreviewHeight);
 
         mOutputAspectRatio = width > height ? (float) width / height : (float) height / width;
         float aspectRatio = mOutputAspectRatio / mInputAspectRatio;
@@ -142,10 +146,9 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
         this.mCamera.setPreviewCallback(previewCallback);
     }
 
-    public int[] setPreviewResolution(int width, int height) {
-        getHolder().setFixedSize(width, height);
-
+    public int[] setPreviewResolution(int width, int height) {                
         mCamera = openCamera();
+        
         mPreviewWidth = width;
         mPreviewHeight = height;
         Camera.Size rs = adaptPreviewResolution(mCamera.new Size(width, height));
@@ -153,6 +156,9 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
             mPreviewWidth = rs.width;
             mPreviewHeight = rs.height;
         }
+        
+        getHolder().setFixedSize(mPreviewWidth, mPreviewHeight);
+        
         mCamera.getParameters().setPreviewSize(mPreviewWidth, mPreviewHeight);
 
         mGLPreviewBuffer = ByteBuffer.allocate(mPreviewWidth * mPreviewHeight * 4);
@@ -203,10 +209,33 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
         setPreviewOrientation(mPreviewOrientation);
     }
 
+    protected int getRotateDeg() {
+        try {
+            int rotate = ((Activity) getContext()).getWindowManager().getDefaultDisplay().getRotation();
+            switch (rotate) {
+                case Surface.ROTATION_0:
+                    return 0;
+                case Surface.ROTATION_90:
+                    return 90;
+                case Surface.ROTATION_180:
+                    return 180;
+                case Surface.ROTATION_270:
+                    return 270;
+            }
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+
+        return -1;
+    }
+    
     public void setPreviewOrientation(int orientation) {
         mPreviewOrientation = orientation;
         Camera.CameraInfo info = new Camera.CameraInfo();
         Camera.getCameraInfo(mCamId, info);
+        
+        int rotateDeg = getRotateDeg();
+        
         if (orientation == Configuration.ORIENTATION_PORTRAIT) {
             if (info.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) {
                 mPreviewRotation = info.orientation % 360;
@@ -222,6 +251,11 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
                 mPreviewRotation = (info.orientation + 90) % 360;
             }
         }
+        
+        if(rotateDeg > 0){
+            mPreviewRotation = mPreviewRotation % rotateDeg;
+        }        
+        
     }
 
     public int getCameraId() {
@@ -257,6 +291,7 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
     public void disableEncoding() {
         mIsEncoding = false;
         mGLIntBufferCache.clear();
+        mGLPreviewBuffer.clear();
 
         if (worker != null) {
             worker.interrupt();
@@ -279,7 +314,7 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
         }
 
         Camera.Parameters params = mCamera.getParameters();
-        params.setPictureSize(mPreviewWidth, mPreviewHeight);
+        //params.setPictureSize(mPreviewWidth, mPreviewHeight);
         params.setPreviewSize(mPreviewWidth, mPreviewHeight);
         int[] range = adaptFpsRange(SrsEncoder.VFPS, params.getSupportedPreviewFpsRange());
         params.setPreviewFpsRange(range[0], range[1]);
@@ -287,6 +322,7 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
         params.setFlashMode(Camera.Parameters.FLASH_MODE_OFF);
         params.setWhiteBalance(Camera.Parameters.WHITE_BALANCE_AUTO);
         params.setSceneMode(Camera.Parameters.SCENE_MODE_AUTO);
+        params.setRecordingHint(true);
 
         List<String> supportedFocusModes = params.getSupportedFocusModes();
         if (supportedFocusModes != null && !supportedFocusModes.isEmpty()) {
@@ -311,6 +347,7 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
             }
         }
 
+        cameraCallbacksHandler.onCameraParameters(params);
         mCamera.setParameters(params);
 
         mCamera.setDisplayOrientation(mPreviewRotation);
@@ -337,8 +374,8 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
         }
     }
 
-    private Camera openCamera() {
-        Camera camera;
+    protected Camera openCamera() {
+        Camera camera = null;
         if (mCamId < 0) {
             Camera.CameraInfo info = new Camera.CameraInfo();
             int numCameras = Camera.getNumberOfCameras();
@@ -361,7 +398,22 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
                 mCamId = 0;
             }
         }
-        camera = Camera.open(mCamId);
+        
+        try {
+            camera = Camera.open(mCamId);
+            
+            camera.setErrorCallback(new Camera.ErrorCallback(){
+                @Override
+                public void onError(int error, Camera camera) {
+                    //may be Camera.CAMERA_ERROR_EVICTED - Camera was disconnected due to use by higher priority user
+                    stopCamera();
+                }
+            });            
+            
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+        
         return camera;
     }
 
@@ -415,9 +467,13 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
 
     public void stopTorch() {
         if (mCamera != null) {
-            Camera.Parameters params = mCamera.getParameters();
-            params.setFlashMode(Camera.Parameters.FLASH_MODE_OFF);
-            mCamera.setParameters(params);
+            try {
+                Camera.Parameters params = mCamera.getParameters();
+                params.setFlashMode(Camera.Parameters.FLASH_MODE_OFF);
+                mCamera.setParameters(params);
+            }catch (Exception e){
+                e.printStackTrace();
+            }
         }
     }
 
@@ -425,4 +481,20 @@ public class SrsCameraView extends GLSurfaceView implements GLSurfaceView.Render
 
         void onGetRgbaFrame(byte[] data, int width, int height);
     }
+    
+    static public class CameraCallbacksHandler implements CameraCallbacks{
+
+        @Override
+        public void onCameraParameters(Camera.Parameters params) {
+
+        }
+    }
+
+    public interface CameraCallbacks {
+        void onCameraParameters(Camera.Parameters params);
+    }
+
+    public void setCameraCallbacksHandler(CameraCallbacksHandler cameraCallbacksHandler) {
+        this.cameraCallbacksHandler = cameraCallbacksHandler;
+    }    
 }

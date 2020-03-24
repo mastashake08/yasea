@@ -54,6 +54,7 @@ public class SrsEncoder {
     private boolean canSoftEncode = false;
 
     private long mPresentTimeUs;
+    private long mPausetime;
 
     private int mVideoColorFormat;
 
@@ -170,6 +171,14 @@ public class SrsEncoder {
         return true;
     }
 
+    public void pause(){
+        mPausetime = System.nanoTime() / 1000;
+    }
+    public void resume(){
+        long resumeTime = (System.nanoTime() / 1000) - mPausetime;
+        mPresentTimeUs = mPresentTimeUs + resumeTime;
+        mPausetime = 0;
+    }
     public void stop() {
         if (useSoftEncoder) {
             closeSoftEncoder();
@@ -178,14 +187,22 @@ public class SrsEncoder {
 
         if (aencoder != null) {
             Log.i(TAG, "stop aencoder");
-            aencoder.stop();
+            try {
+                aencoder.stop();
+            }catch (IllegalStateException e){
+                e.printStackTrace();
+            }
             aencoder.release();
             aencoder = null;
         }
 
         if (vencoder != null) {
             Log.i(TAG, "stop vencoder");
-            vencoder.stop();
+            try {
+                vencoder.stop();
+            }catch (IllegalStateException e){
+                e.printStackTrace();
+            }
             vencoder.release();
             vencoder = null;
         }
@@ -530,10 +547,10 @@ public class SrsEncoder {
     }
 
     public AudioRecord chooseAudioRecord() {
-        AudioRecord mic = new AudioRecord(MediaRecorder.AudioSource.DEFAULT, SrsEncoder.ASAMPLERATE,
+        AudioRecord mic = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, SrsEncoder.ASAMPLERATE,
             AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT, getPcmBufferSize() * 4);
         if (mic.getState() != AudioRecord.STATE_INITIALIZED) {
-            mic = new AudioRecord(MediaRecorder.AudioSource.DEFAULT, SrsEncoder.ASAMPLERATE,
+            mic = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, SrsEncoder.ASAMPLERATE,
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, getPcmBufferSize() * 4);
             if (mic.getState() != AudioRecord.STATE_INITIALIZED) {
                 mic = null;
